@@ -3,6 +3,12 @@
     "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
     "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
   },
+  "whisper_kk": {
+    "repo": "shyngys879/kazakh-whisper-large-v3-turbo",
+    "revision": "dafae810c95496f66184605824be5a0a971d3c09",
+    "quantization": "int8",
+    "converter": "ctranslate2==4.8.2"
+  },
   "speaker": {
     "repo": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
     "revision": "f0c48c298fd835726c27956a5d617bad7115627e"

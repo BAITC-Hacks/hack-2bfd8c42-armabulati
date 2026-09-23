@@ -16,6 +16,7 @@ if (ROOT / '.env').is_file():
 DATA = Path(os.getenv('DAUYS_DATA', os.getenv('ALEM_DATA', str(ROOT / 'data')))).resolve()
 MODELS = Path(os.getenv('ALEM_MODELS', str(ROOT / 'models'))).resolve()
 WHISPER = MODELS / 'whisper'
+WHISPER_KK = MODELS / 'whisper-kk'
 SPEAKER = MODELS / 'speaker.onnx'
 LLM = MODELS / 'qwen.gguf'
 LLAMA = Path(os.getenv('ALEM_LLAMA', str(ROOT / 'runtime' / ('llama-server.exe' if os.name == 'nt' else 'llama-server'))))

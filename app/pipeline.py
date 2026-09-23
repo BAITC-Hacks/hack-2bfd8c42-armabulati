@@ -47,11 +47,15 @@ def process(mid, speech):
         def progress(stage, percent):
             item.update(stage=stage, progress=percent)
             store.save(item)
-        item.update(analyze(item, progress))
+        if item.get('speech_quality', {}).get('needs_review'):
+            item.update(summary='Качество распознавания требует проверки. Прослушайте аудио и исправьте текст; автоматические поручения не сформированы.', decisions=[], tasks=[])
+        else:
+            item.update(analyze(item, progress))
         item.setdefault('timings', {}).update(analysis_seconds=round(time.perf_counter() - analysis_started, 2),
                                             total_seconds=round(time.perf_counter() - started, 2))
-        item.update(status='ready', stage='Протокол готов к проверке', progress=100)
-        cache.save(item)
+        item.update(status='ready', stage='Транскрипт требует проверки' if item.get('speech_quality', {}).get('needs_review') else 'Протокол готов к проверке', progress=100)
+        if not item.get('speech_quality', {}).get('needs_review'):
+            cache.save(item)
         store.save(item, 'Протокол сформирован локально')
     except Exception as error:
         item = store.get(mid)

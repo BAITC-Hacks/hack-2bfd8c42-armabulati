@@ -8,8 +8,8 @@ import unicodedata
 from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from app.config import DATA, WHISPER, THREADS
-from app.speech import transcription_options
+from app.config import DATA
+from app.speech import transcribe_audio
 
 
 def normalize(text):
@@ -42,15 +42,13 @@ def main():
     parser.add_argument('--fast',action='store_true')
     parser.add_argument('--output',type=Path,default=DATA/'speech-check.json')
     args=parser.parse_args()
-    from faster_whisper import WhisperModel
     from faster_whisper.audio import decode_audio
     started=time.perf_counter()
     audio=decode_audio(str(args.audio),sampling_rate=16000)
-    model=WhisperModel(str(WHISPER),device='cpu',compute_type='int8',cpu_threads=THREADS,local_files_only=True)
-    segments,info=model.transcribe(audio,**transcription_options(args.language,args.fast))
-    rows=[{'start':s.start,'end':s.end,'text':s.text.strip()} for s in segments]
+    segments,info=transcribe_audio(audio,args.language,args.fast)
+    rows=[{k:s[k] for k in ('start','end','text')} for s in segments]
     hypothesis=' '.join(row['text'] for row in rows)
-    report={'language_mode':args.language,'detected_language':info.language,'audio_seconds':len(audio)/16000,
+    report={'language_mode':args.language,'detected_language':info['language'],'speech_quality':info,'audio_seconds':len(audio)/16000,
             'processing_seconds':round(time.perf_counter()-started,2),'transcript':hypothesis,'segments':rows,
             'metrics':metrics(args.reference.read_text(encoding='utf-8-sig'),hypothesis) if args.reference else None}
     args.output.parent.mkdir(parents=True,exist_ok=True)

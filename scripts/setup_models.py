@@ -73,6 +73,8 @@ def main():
                             shutil.copyfileobj(src, dst)
             manifest['llama'] = {'release': 'b11120', 'asset': asset['name'], 'sha256': digest}
             manifest_path.write_text(json.dumps(manifest, indent=2))
+    from setup_kazakh import main as setup_kazakh
+    setup_kazakh()
     print('Models ready. Inference is offline.', flush=True)
 
 

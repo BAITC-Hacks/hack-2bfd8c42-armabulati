@@ -6,7 +6,7 @@ import uuid
 from .config import ROOT
 from . import store
 
-PIPELINE_VERSION = '2-stream-cache'
+PIPELINE_VERSION = '3-kazakh-specialized'
 
 
 def key_for(digest, item):
@@ -34,7 +34,7 @@ def restore(item):
 def save(item):
     if not item.get('cache_key'):
         return
-    keys = ('segments', 'speakers', 'tasks', 'summary', 'decisions', 'warnings', 'duration', 'detected_language')
+    keys = ('segments', 'speakers', 'tasks', 'summary', 'decisions', 'warnings', 'duration', 'detected_language', 'speech_quality')
     payload = {key: copy.deepcopy(item[key]) for key in keys if key in item}
     with store.connect() as con:
         con.execute('INSERT OR REPLACE INTO analysis_cache(key,payload,source_id) VALUES(?,?,?)',

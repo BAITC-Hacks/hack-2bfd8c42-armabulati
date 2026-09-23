@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
 from . import store, pipeline
-from .config import DATA, ROOT, WHISPER, SPEAKER, LLM, LLAMA, MAX_UPLOAD
+from .config import DATA, ROOT, WHISPER, WHISPER_KK, SPEAKER, LLM, LLAMA, MAX_UPLOAD
 from .dates import task_state
 from .export import pdf_bytes, docx_bytes, anonymize
 from . import cache
@@ -87,12 +87,13 @@ async def secure(request, call_next):
 
 def models_status():
     return {'speech': all((WHISPER / name).is_file() for name in ['model.bin', 'config.json', 'tokenizer.json']),
+            'speech_kk': all((WHISPER_KK / name).is_file() for name in ['model.bin', 'config.json', 'tokenizer.json']),
             'speakers': SPEAKER.is_file(), 'analysis': LLM.is_file() and LLAMA.is_file()}
 
 
 def require_models(speech=True):
     state = models_status()
-    if not state['analysis'] or (speech and not (state['speech'] and state['speakers'])):
+    if not state['analysis'] or (speech and not (state['speech'] and state['speech_kk'] and state['speakers'])):
         raise HTTPException(503, 'Модели не установлены. Выполните scripts/setup_models.py и обновите страницу.')
 
 
@@ -117,7 +118,7 @@ def new_item(title, meeting_date, language, source):
 @app.get('/api/bootstrap')
 def bootstrap():
     return {'token': auth.current_user.get()['csrf'], 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024,
-            'version': '0.3.0', 'active_jobs': len(pipeline.active)}
+            'version': '0.3.1', 'active_jobs': len(pipeline.active)}
 
 
 @app.get('/api/meetings')
@@ -125,6 +126,7 @@ def list_meetings():
     result = []
     for item in store.all_meetings(auth.current_user.get()['id']):
         result.append({**{k: item.get(k) for k in ['id', 'title', 'date', 'status', 'stage', 'progress', 'duration', 'source', 'error', 'timings', 'cache_hit', 'processing_mode']},
+                       'needs_review': item.get('speech_quality', {}).get('needs_review', False),
                        'task_count': len(item['tasks']), 'speaker_count': len(item['speakers']),
                        'done_count': sum(t['status'] == 'done' for t in item['tasks'])})
     return result
@@ -250,6 +252,29 @@ def retry(mid: str):
     store.save(item)
     pipeline.submit(mid, speech=item['source'] == 'audio' and not item['segments'])
     return {'id': mid}
+
+
+class Retranscribe(BaseModel):
+    language: Literal['auto', 'ru', 'kk', 'mixed']
+
+
+@app.post('/api/meetings/{mid}/retranscribe', status_code=202)
+def retranscribe(mid: str, body: Retranscribe):
+    original = require(mid, True)
+    if not original.get('audio_file'):
+        raise HTTPException(400, 'Для повторного распознавания нужна аудиозапись.')
+    require_models()
+    if len(pipeline.active) >= 8:
+        raise HTTPException(429, 'В очереди уже 8 записей.')
+    item = new_item((original['title'][:175] + ' · новое распознавание'), original['date'], body.language, 'audio')
+    source = DATA / original['audio_file']
+    item.update(audio_file=f"uploads/{item['id']}{source.suffix}", filename=original.get('filename'),
+                speaker_count=original.get('speaker_count', 0), consent=original.get('consent', True))
+    shutil.copyfile(source, DATA / item['audio_file'])
+    # Deliberately no cache: preserve the previous transcript and force fresh ASR.
+    store.save(item, 'Повторное распознавание: исходный протокол сохранён')
+    pipeline.submit(item['id'])
+    return {'id': item['id']}
 
 
 class TaskEdit(BaseModel):

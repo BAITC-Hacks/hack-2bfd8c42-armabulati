@@ -89,6 +89,13 @@ def diarize(audio, segments, requested=0):
     return output, speakers, ['Группы голосов определены автоматически. Подтвердите имена участников; короткие и одновременные реплики могут быть разделены неточно.']
 
 
+def transcription_options(language, fast=False):
+    return {'language': language if language in ('ru','kk') else None,
+            'beam_size': 1 if fast else 3, 'temperature': 0, 'vad_filter': True,
+            'word_timestamps': True, 'condition_on_previous_text': False,
+            'multilingual': language == 'mixed'}
+
+
 def run(mid):
     from faster_whisper import WhisperModel
     from faster_whisper.audio import decode_audio
@@ -103,11 +110,7 @@ def run(mid):
     item.update(duration=round(duration, 2), stage='Загрузка модели распознавания', progress=8)
     store.save(item)
     model = WhisperModel(str(WHISPER), device='cpu', compute_type='int8', cpu_threads=THREADS, local_files_only=True)
-    language = item['language'] if item['language'] in ('ru', 'kk') else None
-    fast = item.get('processing_mode') == 'fast'
-    iterator, info = model.transcribe(audio, language=language, beam_size=1 if fast else 3,
-        temperature=0, vad_filter=True, word_timestamps=True, condition_on_previous_text=False,
-        multilingual=item['language'] == 'mixed')
+    iterator, info = model.transcribe(audio, **transcription_options(item['language'], item.get('processing_mode') == 'fast'))
     segments = []
     for s in iterator:
         if not s.text.strip():

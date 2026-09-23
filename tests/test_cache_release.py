@@ -34,9 +34,9 @@ def test_release_excludes_private_and_runtime_files(tmp_path):
     archive = build(tmp_path)
     with zipfile.ZipFile(archive) as zipped:
         names = zipped.namelist()
-        assert 'alem-ai/app/main.py' in names
-        assert 'alem-ai/web/tools.js' in names
-        assert 'alem-ai/README.md' in names
+        assert 'dauys-hunt/app/main.py' in names
+        assert 'dauys-hunt/web/tools.js' in names
+        assert 'dauys-hunt/README.md' in names
         for name in names:
             assert not any(part in name.split('/') for part in ('data','models','runtime','.venv','.git','__pycache__'))
             assert not name.endswith(('.mp3','.gguf','.sqlite3','.log','.env'))

@@ -39,9 +39,13 @@ def get(mid):
     return json.loads(row['payload']) if row else None
 
 
-def all_meetings():
+def all_meetings(owner_id=None):
     with connect() as con:
-        return [json.loads(r['payload']) for r in con.execute('SELECT payload FROM meetings ORDER BY updated DESC')]
+        if owner_id is not None:
+            rows = con.execute("SELECT payload FROM meetings WHERE json_extract(payload,'$.owner_id')=? ORDER BY updated DESC", (owner_id,))
+        else:
+            rows = con.execute('SELECT payload FROM meetings ORDER BY updated DESC')
+        return [json.loads(r['payload']) for r in rows]
 
 
 def delete(mid):

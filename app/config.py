@@ -2,7 +2,18 @@ import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DATA = Path(os.getenv('ALEM_DATA', str(ROOT / 'data'))).resolve()
+# A deliberately small KEY=VALUE format, no shell expansion or executable content.
+if (ROOT / '.env').is_file():
+    for line in (ROOT / '.env').read_text(encoding='utf-8-sig').splitlines():
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        key, sep, value = line.partition('=')
+        if sep and key.strip().startswith('DAUYS_'):
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            os.environ.setdefault(key.strip(), value)
+DATA = Path(os.getenv('DAUYS_DATA', os.getenv('ALEM_DATA', str(ROOT / 'data')))).resolve()
 MODELS = Path(os.getenv('ALEM_MODELS', str(ROOT / 'models'))).resolve()
 WHISPER = MODELS / 'whisper'
 SPEAKER = MODELS / 'speaker.onnx'

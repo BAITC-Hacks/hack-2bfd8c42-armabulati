@@ -51,7 +51,7 @@ def docx_bytes(item):
     doc.styles['Normal'].font.size = Pt(10)
     doc.add_heading('ПРОТОКОЛ СОВЕЩАНИЯ', 0)
     doc.add_heading(item['title'], 1)
-    doc.add_paragraph(f"Дата: {item['date']} • Alem AI • Локальная обработка")
+    doc.add_paragraph(f"Дата: {item['date']} • Dauys Hunt • Локальная обработка")
     doc.add_paragraph('Черновик, сформированный ИИ. Непроверенные поручения и неоднозначные сроки требуют подтверждения секретаря.')
     if item.get('anonymized'):
         doc.add_paragraph('Известные имена заменены. Перед публичной демонстрацией проверьте весь текст на косвенные идентификаторы.')
@@ -103,7 +103,7 @@ def pdf_bytes(item):
     small = ParagraphStyle('small', parent=styles['Normal'], fontSize=8, leading=11)
     def p(text, style='Normal'):
         return Paragraph(escape(str(text)).replace('\n', '<br/>'), styles[style])
-    story = [p('ПРОТОКОЛ СОВЕЩАНИЯ', 'Title'), p(item['title'], 'Heading1'), p(f"{item['date']} · Alem AI · Локальная обработка"), Spacer(1, 12),
+    story = [p('ПРОТОКОЛ СОВЕЩАНИЯ', 'Title'), p(item['title'], 'Heading1'), p(f"{item['date']} · Dauys Hunt · Локальная обработка"), Spacer(1, 12),
              p('Черновик ИИ. Подтвердите поручения и неоднозначные сроки перед использованием.'), p('Краткое содержание', 'Heading2'), p(item.get('summary', ''))]
     if item.get('anonymized'):
         story.append(p('Известные имена заменены. Проверьте текст на косвенные идентификаторы перед публикацией.'))
@@ -122,7 +122,7 @@ def pdf_bytes(item):
         story.extend([p(f"[{s['id']}] {timestamp(s['start'])} · {item['speakers'].get(s['speaker'], s['speaker'])}"), p(s['text']), Spacer(1, 7)])
     def footer(canvas, doc):
         canvas.setFont('Alem', 8)
-        canvas.drawString(48, 25, 'Alem AI · Протокол совещания')
+        canvas.drawString(48, 25, 'Dauys Hunt · Протокол совещания')
         canvas.drawRightString(A4[0] - 48, 25, str(doc.page))
     stream = io.BytesIO()
     SimpleDocTemplate(stream, pagesize=A4, leftMargin=48, rightMargin=48, topMargin=40, bottomMargin=44, title='Протокол совещания').build(story, onFirstPage=footer, onLaterPages=footer)

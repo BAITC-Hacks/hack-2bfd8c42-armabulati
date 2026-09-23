@@ -2,6 +2,7 @@
 import argparse
 import json
 import time
+import getpass
 from pathlib import Path
 import httpx
 
@@ -14,15 +15,19 @@ def main():
     parser.add_argument('--mode', default='accurate', choices=['accurate','fast'])
     parser.add_argument('--speakers', type=int, default=0)
     parser.add_argument('--repeat', action='store_true', help='Verify duplicate import uses the cache')
+    parser.add_argument('--email', required=True, help='Registered local account; password is prompted securely')
     args = parser.parse_args()
     with httpx.Client(base_url='http://127.0.0.1:8765', timeout=120, trust_env=False) as client:
-        client.headers['X-Alem-Token'] = client.get('/api/bootstrap').json()['token']
+        client.headers['X-CSRF-Token'] = client.get('/api/auth/session').json()['token']
+        login = client.post('/api/auth/login', json={'email': args.email, 'password': getpass.getpass('Password: ')})
+        login.raise_for_status()
+        client.headers['X-CSRF-Token'] = login.json()['token']
         reports = []
         for run in range(2 if args.repeat else 1):
             started = time.perf_counter()
             with args.audio.open('rb') as file:
                 response = client.post('/api/meetings', data={
-                    'title':f'Проверка v0.2 · {args.audio.stem}' + (' · повтор' if run else ''),
+                    'title':f'Проверка Dauys Hunt · {args.audio.stem}' + (' · повтор' if run else ''),
                     'meeting_date':args.date, 'language':args.language, 'processing_mode':args.mode,
                     'speaker_count':args.speakers, 'consent':'true'},
                     files={'file':(args.audio.name,file,'application/octet-stream')})

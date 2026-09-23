@@ -19,39 +19,67 @@ from .config import DATA, ROOT, WHISPER, SPEAKER, LLM, LLAMA, MAX_UPLOAD
 from .dates import task_state
 from .export import pdf_bytes, docx_bytes, anonymize
 from . import cache
+from . import auth
 from .insights import insights, search_segments, followup_agenda, calendar
 
-TOKEN = secrets.token_urlsafe(32)
 mutations = asyncio.Lock()
 
 
 @asynccontextmanager
 async def lifespan(app):
     store.init()
+    auth.init()
     (DATA / 'uploads').mkdir(exist_ok=True)
     yield
 
 
-app = FastAPI(title='Alem AI — локальный протокол совещания', lifespan=lifespan)
+app = FastAPI(title='Dauys Hunt — от голоса к действиям', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', '[::1]'])
 
 
 @app.middleware('http')
 async def secure(request, call_next):
-    if request.headers.get('sec-fetch-site') == 'cross-site':
-        return JSONResponse({'detail': 'Доступ разрешён только из локального приложения.'}, status_code=403)
-    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
-        if not secrets.compare_digest(request.headers.get('x-alem-token', ''), TOKEN):
-            return JSONResponse({'detail': 'Обновите страницу: отсутствует токен сессии.'}, status_code=403)
-        if int(request.headers.get('content-length', '0') or '0') > MAX_UPLOAD + 1024 * 1024:
-            return JSONResponse({'detail': 'Размер запроса превышает 250 МБ.'}, status_code=413)
-        # A meeting is persisted as one JSON document: serialize read/modify/write requests.
-        async with mutations:
+    path = request.url.path
+    callback = path in ('/api/auth/oauth/google/callback', '/api/auth/oauth/facebook/callback') and request.method == 'GET'
+    public = path in auth.PUBLIC or callback or path in ('/api/auth/oauth/google/start', '/api/auth/oauth/facebook/start')
+    user = auth.session(request) if path.startswith('/api/') else None
+    context_token = auth.current_user.set(user)
+    response = None
+    try:
+        if request.headers.get('sec-fetch-site') == 'cross-site' and not callback:
+            response = JSONResponse({'detail':'Доступ с другого сайта запрещён.'}, status_code=403)
+        elif path.startswith('/api/') and not public and not user:
+            response = JSONResponse({'detail':'Войдите в аккаунт.'}, status_code=401)
+        elif request.method not in ('GET','HEAD','OPTIONS'):
+            expected_origin = str(request.base_url).rstrip('/')
+            supplied_origin = request.headers.get('origin')
+            if supplied_origin and supplied_origin != expected_origin:
+                response = JSONResponse({'detail':'Недопустимый источник запроса.'}, status_code=403)
+            elif not auth.csrf_valid(request, user):
+                response = JSONResponse({'detail':'Обновите страницу: токен сессии недействителен.'}, status_code=403)
+            else:
+                try:
+                    length = int(request.headers.get('content-length','0'))
+                except ValueError:
+                    length = MAX_UPLOAD + 1024*1024 + 1
+                limit = 16*1024 if path.startswith('/api/auth/') else MAX_UPLOAD + 1024*1024
+                if length > limit:
+                    response = JSONResponse({'detail':'Размер запроса превышает допустимый.'}, status_code=413)
+                elif path.startswith('/api/auth/') and request.headers.get('transfer-encoding'):
+                    response = JSONResponse({'detail':'Для запросов входа требуется Content-Length.'}, status_code=411)
+                else:
+                    async with mutations:
+                        response = await call_next(request)
+        if response is None:
             response = await call_next(request)
-    else:
-        response = await call_next(request)
+    finally:
+        auth.current_user.reset(context_token)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Permissions-Policy'] = 'camera=(), geolocation=(), microphone=(self)'
+    if request.url.scheme == 'https':
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000'
     response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -70,7 +98,8 @@ def require_models(speech=True):
 
 def require(mid, editable=False):
     item = store.get(mid)
-    if not item:
+    user = auth.current_user.get()
+    if not item or not user or item.get('owner_id') != user['id']:
         raise HTTPException(404, 'Совещание не найдено.')
     if editable and item['status'] in ('processing', 'queued'):
         raise HTTPException(409, 'Дождитесь завершения обработки.')
@@ -79,6 +108,7 @@ def require(mid, editable=False):
 
 def new_item(title, meeting_date, language, source):
     return {'id': uuid.uuid4().hex, 'title': title, 'date': meeting_date, 'language': language,
+        'owner_id': auth.current_user.get()['id'],
         'created_at': datetime.now().isoformat(), 'status': 'queued', 'stage': 'В очереди', 'progress': 0,
         'source': source, 'segments': [], 'speakers': {}, 'summary': '', 'decisions': [], 'tasks': [], 'warnings': [], 'error': None,
         'processing_mode': 'accurate', 'timings': {}, 'cache_hit': False}
@@ -86,14 +116,14 @@ def new_item(title, meeting_date, language, source):
 
 @app.get('/api/bootstrap')
 def bootstrap():
-    return {'token': TOKEN, 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024,
-            'version': '0.2.0', 'active_jobs': len(pipeline.active)}
+    return {'token': auth.current_user.get()['csrf'], 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024,
+            'version': '0.3.0', 'active_jobs': len(pipeline.active)}
 
 
 @app.get('/api/meetings')
 def list_meetings():
     result = []
-    for item in store.all_meetings():
+    for item in store.all_meetings(auth.current_user.get()['id']):
         result.append({**{k: item.get(k) for k in ['id', 'title', 'date', 'status', 'stage', 'progress', 'duration', 'source', 'error', 'timings', 'cache_hit', 'processing_mode']},
                        'task_count': len(item['tasks']), 'speaker_count': len(item['speakers']),
                        'done_count': sum(t['status'] == 'done' for t in item['tasks'])})
@@ -199,7 +229,7 @@ def agenda(mid: str):
 def calendar_export(mid: str):
     item = require(mid, True)
     return Response(calendar(item), media_type='text/calendar; charset=utf-8',
-                    headers={'Content-Disposition': 'attachment; filename="alem-tasks.ics"'})
+                    headers={'Content-Disposition': 'attachment; filename="dauys-tasks.ics"'})
 
 
 @app.get('/api/meetings/{mid}/audio')
@@ -340,7 +370,7 @@ def export(mid: str, kind: Literal['pdf', 'docx', 'json'], anonymous: bool = Fal
 def notifications():
     today = date.today()
     result = []
-    for item in store.all_meetings():
+    for item in store.all_meetings(auth.current_user.get()['id']):
         for task in item['tasks']:
             if task['status'] == 'done' or not task.get('due_date'):
                 continue
@@ -352,4 +382,5 @@ def notifications():
     return sorted(result, key=lambda t: t['due_date'])
 
 
+app.include_router(auth.router)
 app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')

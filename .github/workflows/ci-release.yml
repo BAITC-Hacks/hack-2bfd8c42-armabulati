@@ -1,4 +1,4 @@
-name: Verify and deliver Alem AI
+name: Verify and deliver Dauys Hunt
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: alem-${{ github.workflow }}-${{ github.ref }}
+  group: dauys-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -44,7 +44,9 @@ jobs:
           node --check web/app.js
           node --check web/tools.js
           node --check web/icons.js
-          node --test tests/icon_tooltips.test.cjs
+          node --check web/auth.js
+          node --check web/deadlines.js
+          node --test tests/*.test.cjs
       - name: Verify release allowlist
         run: python scripts/package_release.py
       - name: Upload test evidence
@@ -76,7 +78,7 @@ jobs:
       - name: Upload downloadable build
         uses: actions/upload-artifact@v4
         with:
-          name: alem-ai-${{ github.sha }}
+          name: dauys-hunt-${{ github.sha }}
           path: dist/*
           if-no-files-found: error
           retention-days: 30
@@ -94,5 +96,5 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
-            gh release create "$tag" dist/* --target "$COMMIT_SHA" --title "Alem AI ${version} · build ${BUILD_NUMBER}" --notes-file release-notes.md
+            gh release create "$tag" dist/* --target "$COMMIT_SHA" --title "Dauys Hunt ${version} · build ${BUILD_NUMBER}" --notes-file release-notes.md
           fi

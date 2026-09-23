@@ -98,7 +98,7 @@ def fold_ics(line):
 
 
 def calendar(item):
-    lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Alem AI//Meeting tasks//RU', 'CALSCALE:GREGORIAN']
+    lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Dauys Hunt//Meeting tasks//RU', 'CALSCALE:GREGORIAN']
     stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
     for t in item['tasks']:
         # Ambiguous dates must not silently create misleading reminders.

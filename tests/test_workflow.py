@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from app import store, cache, pipeline
 from app.main import app
 from test_core import sample
+from auth_helpers import register
 
 
 def test_upload_review_tools_and_repeated_recording(tmp_path, monkeypatch):
@@ -11,7 +12,7 @@ def test_upload_review_tools_and_repeated_recording(tmp_path, monkeypatch):
     monkeypatch.setattr('app.main.require_models', lambda *args: None)
     monkeypatch.setattr(pipeline, 'submit', lambda *args, **kwargs: True)
     with TestClient(app, base_url='http://localhost') as client:
-        client.headers['X-Alem-Token'] = client.get('/api/bootstrap').json()['token']
+        register(client)
         data = {'title':'Проверка','meeting_date':'2026-09-23','language':'ru',
                 'speaker_count':1,'consent':'true','processing_mode':'fast'}
         response = client.post('/api/meetings', data=data, files={'file':('meeting.wav', b'test audio bytes', 'audio/wav')})

@@ -12,7 +12,7 @@ PIPELINE_VERSION = '2-stream-cache'
 def key_for(digest, item):
     lock = ROOT / 'models.lock.json'
     signature = hashlib.sha256(lock.read_bytes()).hexdigest() if lock.exists() else 'unlocked'
-    options = {key: item.get(key) for key in ('date', 'language', 'speaker_count', 'processing_mode')}
+    options = {key: item.get(key) for key in ('date', 'language', 'speaker_count', 'processing_mode', 'owner_id')}
     return hashlib.sha256(json.dumps([PIPELINE_VERSION, signature, digest, options], sort_keys=True).encode()).hexdigest()
 
 

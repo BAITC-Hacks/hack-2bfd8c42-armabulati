@@ -1,0 +1,11 @@
+fastapi>=0.115,<1
+uvicorn>=0.34,<1
+python-multipart>=0.0.20,<1
+faster-whisper>=1.1,<2
+scikit-learn>=1.6,<2
+kaldi-native-fbank>=1.21,<2
+python-docx>=1.1,<2
+reportlab>=5,<6
+httpx>=0.28,<1
+huggingface-hub>=0.30,<2
+pytest>=8,<10

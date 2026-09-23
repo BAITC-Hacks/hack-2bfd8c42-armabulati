@@ -1,0 +1,290 @@
+import json
+import os
+import secrets
+import shutil
+import uuid
+from contextlib import asynccontextmanager
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Literal
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi.responses import FileResponse, Response, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+from pydantic import BaseModel, Field
+from . import store, pipeline
+from .config import DATA, ROOT, WHISPER, SPEAKER, LLM, LLAMA, MAX_UPLOAD
+from .dates import task_state
+from .export import pdf_bytes, docx_bytes, anonymize
+
+TOKEN = secrets.token_urlsafe(32)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    store.init()
+    (DATA / 'uploads').mkdir(exist_ok=True)
+    yield
+
+
+app = FastAPI(title='Alem AI — локальный протокол совещания', lifespan=lifespan)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', '[::1]'])
+
+
+@app.middleware('http')
+async def secure(request, call_next):
+    if request.headers.get('sec-fetch-site') == 'cross-site':
+        return JSONResponse({'detail': 'Доступ разрешён только из локального приложения.'}, status_code=403)
+    if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+        if not secrets.compare_digest(request.headers.get('x-alem-token', ''), TOKEN):
+            return JSONResponse({'detail': 'Обновите страницу: отсутствует токен сессии.'}, status_code=403)
+    response = await call_next(request)
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    response.headers['Cache-Control'] = 'no-store'
+    return response
+
+
+def models_status():
+    return {'speech': all((WHISPER / name).is_file() for name in ['model.bin', 'config.json', 'tokenizer.json']),
+            'speakers': SPEAKER.is_file(), 'analysis': LLM.is_file() and LLAMA.is_file()}
+
+
+def require_models(speech=True):
+    state = models_status()
+    if not state['analysis'] or (speech and not (state['speech'] and state['speakers'])):
+        raise HTTPException(503, 'Модели не установлены. Выполните scripts/setup_models.py и обновите страницу.')
+
+
+def require(mid, editable=False):
+    item = store.get(mid)
+    if not item:
+        raise HTTPException(404, 'Совещание не найдено.')
+    if editable and item['status'] in ('processing', 'queued'):
+        raise HTTPException(409, 'Дождитесь завершения обработки.')
+    return item
+
+
+def new_item(title, meeting_date, language, source):
+    return {'id': uuid.uuid4().hex, 'title': title, 'date': meeting_date, 'language': language,
+        'created_at': datetime.now().isoformat(), 'status': 'queued', 'stage': 'В очереди', 'progress': 0,
+        'source': source, 'segments': [], 'speakers': {}, 'summary': '', 'decisions': [], 'tasks': [], 'warnings': [], 'error': None}
+
+
+@app.get('/api/bootstrap')
+def bootstrap():
+    return {'token': TOKEN, 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024}
+
+
+@app.get('/api/meetings')
+def list_meetings():
+    result = []
+    for item in store.all_meetings():
+        result.append({**{k: item.get(k) for k in ['id', 'title', 'date', 'status', 'stage', 'progress', 'duration', 'source', 'error']},
+                       'task_count': len(item['tasks']), 'speaker_count': len(item['speakers']),
+                       'done_count': sum(t['status'] == 'done' for t in item['tasks'])})
+    return result
+
+
+@app.post('/api/meetings', status_code=202)
+async def upload(file: UploadFile = File(...), title: str = Form(..., min_length=1, max_length=200),
+                 meeting_date: date = Form(...), language: Literal['auto', 'ru', 'kk', 'mixed'] = Form('auto'),
+                 speaker_count: int = Form(0, ge=0, le=20), consent: bool = Form(False)):
+    if not consent:
+        raise HTTPException(400, 'Подтвердите, что участники уведомлены о записи и обработке.')
+    require_models()
+    suffix = Path(file.filename or '').suffix.lower()
+    if suffix not in {'.mp3', '.wav', '.m4a', '.ogg', '.webm', '.mp4', '.flac', '.aac', '.mkv'}:
+        raise HTTPException(400, 'Поддерживаются MP3, WAV, M4A, OGG, WEBM, MP4, FLAC, AAC, MKV.')
+    item = new_item(title.strip() or 'Совещание', meeting_date.isoformat(), language, 'audio')
+    item.update(filename=Path(file.filename).name, audio_file=f"uploads/{item['id']}{suffix}", speaker_count=speaker_count, consent=True)
+    target = DATA / item['audio_file']
+    size = 0
+    try:
+        with target.open('wb') as output:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD:
+                    raise HTTPException(413, 'Размер записи превышает 250 МБ.')
+                output.write(chunk)
+        if size == 0:
+            raise HTTPException(400, 'Файл пустой.')
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    store.save(item, 'Загружена запись; уведомление участников подтверждено')
+    pipeline.submit(item['id'])
+    return {'id': item['id']}
+
+
+class TranscriptInput(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    date: date
+    text: str = Field(min_length=10, max_length=100000)
+    consent: bool = False
+
+
+@app.post('/api/transcripts', status_code=202)
+def import_transcript(body: TranscriptInput):
+    if not body.consent:
+        raise HTTPException(400, 'Требуется подтверждение уведомления участников.')
+    require_models(False)
+    item = new_item(body.title, body.date.isoformat(), 'mixed', 'text')
+    names = {}
+    for line in body.text.splitlines():
+        if not line.strip():
+            continue
+        name, sep, text = line.partition(':')
+        if not sep or len(name) > 100:
+            name, text = 'Участник', line
+        name = name.strip()
+        if name not in names:
+            names[name] = f'S{len(names) + 1}'
+        item['segments'].append({'id': len(item['segments']) + 1, 'speaker': names[name], 'text': text.strip(), 'start': 0, 'end': 0, 'confidence': None})
+    if not item['segments']:
+        raise HTTPException(400, 'Текст не содержит реплик.')
+    item['speakers'] = {value: key for key, value in names.items()}
+    item['warnings'] = ['Импортирован текст. Распознавание аудио и акустическая диаризация для этого совещания не выполнялись.']
+    store.save(item, 'Импортирован текст')
+    pipeline.submit(item['id'], speech=False)
+    return {'id': item['id']}
+
+
+@app.get('/api/meetings/{mid}')
+def get_meeting(mid: str):
+    item = require(mid)
+    for t in item['tasks']:
+        t['computed_status'] = task_state(t)
+    return item
+
+
+@app.get('/api/meetings/{mid}/audio')
+def audio(mid: str):
+    item = require(mid)
+    if not item.get('audio_file'):
+        raise HTTPException(404, 'У этого совещания нет аудиозаписи.')
+    return FileResponse(DATA / item['audio_file'])
+
+
+@app.post('/api/meetings/{mid}/retry', status_code=202)
+def retry(mid: str):
+    item = require(mid, True)
+    if item['status'] != 'error':
+        raise HTTPException(409, 'Повторная обработка доступна после ошибки.')
+    require_models(item['source'] == 'audio' and not item['segments'])
+    item.update(status='queued', stage='В очереди', error=None)
+    store.save(item)
+    pipeline.submit(mid, speech=item['source'] == 'audio' and not item['segments'])
+    return {'id': mid}
+
+
+class TaskEdit(BaseModel):
+    title: str = Field(min_length=1, max_length=2000)
+    assignee: str = Field(max_length=200)
+    speaker_id: str = ''
+    due_date: date | None = None
+    status: Literal['todo', 'in_progress', 'done']
+    priority: Literal['normal', 'high']
+    reviewed: bool
+
+
+@app.patch('/api/meetings/{mid}/tasks/{tid}')
+def edit_task(mid: str, tid: str, body: TaskEdit):
+    item = require(mid, True)
+    task = next((t for t in item['tasks'] if t['id'] == tid), None)
+    if task is None:
+        raise HTTPException(404, 'Поручение не найдено.')
+    if body.speaker_id and body.speaker_id not in item['speakers']:
+        raise HTTPException(400, 'Неизвестный участник.')
+    task.update(body.model_dump(mode='json'))
+    if body.reviewed:
+        task['date_uncertain'] = not bool(body.due_date)
+    store.save(item, 'Поручение отредактировано')
+    return task
+
+
+class SpeakerEdit(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+
+
+@app.patch('/api/meetings/{mid}/speakers/{sid}')
+def edit_speaker(mid: str, sid: str, body: SpeakerEdit):
+    item = require(mid, True)
+    if sid not in item['speakers']:
+        raise HTTPException(404, 'Участник не найден.')
+    item['speakers'][sid] = body.name
+    for t in item['tasks']:
+        if t.get('speaker_id') == sid:
+            t['assignee'] = body.name
+    store.save(item, 'Подтверждено имя участника')
+    return {'ok': True}
+
+
+class SegmentEdit(BaseModel):
+    text: str = Field(min_length=1, max_length=5000)
+    speaker: str
+
+
+@app.patch('/api/meetings/{mid}/segments/{sid}')
+def edit_segment(mid: str, sid: int, body: SegmentEdit):
+    item = require(mid, True)
+    segment = next((s for s in item['segments'] if s['id'] == sid), None)
+    if not segment or body.speaker not in item['speakers']:
+        raise HTTPException(400, 'Реплика или участник не найдены.')
+    segment.update(body.model_dump())
+    for t in item['tasks']:
+        if sid in t['evidence_ids']:
+            t['evidence'] = ' '.join(s['text'] for s in item['segments'] if s['id'] in t['evidence_ids'])
+            t['reviewed'] = False
+    store.save(item, 'Исправлен транскрипт')
+    return {'ok': True}
+
+
+@app.delete('/api/meetings/{mid}')
+def delete_meeting(mid: str):
+    item = require(mid, True)
+    if item.get('audio_file'):
+        (DATA / item['audio_file']).unlink(missing_ok=True)
+    (DATA / f'{mid}.log').unlink(missing_ok=True)
+    store.delete(mid)
+    return {'ok': True}
+
+
+@app.get('/api/meetings/{mid}/export/{kind}')
+def export(mid: str, kind: Literal['pdf', 'docx', 'json'], anonymous: bool = False):
+    item = require(mid, True)
+    if item['status'] != 'ready':
+        raise HTTPException(409, 'Экспорт доступен после формирования протокола.')
+    if anonymous:
+        item = anonymize(item)
+    if kind == 'json':
+        item.pop('audio_file', None)
+        item.pop('filename', None)
+        content, media = json.dumps(item, ensure_ascii=False, indent=2).encode(), 'application/json'
+    elif kind == 'pdf':
+        content, media = pdf_bytes(item), 'application/pdf'
+    else:
+        content, media = docx_bytes(item), 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    return Response(content, media_type=media, headers={'Content-Disposition': f'attachment; filename="protocol-{mid[:8]}.{kind}"'})
+
+
+@app.get('/api/notifications')
+def notifications():
+    today = date.today()
+    result = []
+    for item in store.all_meetings():
+        for task in item['tasks']:
+            if task['status'] == 'done' or not task.get('due_date'):
+                continue
+            due = date.fromisoformat(task['due_date'])
+            if due <= today + timedelta(days=2):
+                result.append({'id': task['id'], 'meeting_id': item['id'], 'meeting_title': item['title'],
+                    'title': task['title'], 'assignee': task['assignee'], 'due_date': task['due_date'],
+                    'kind': 'overdue' if due < today else 'due', 'uncertain': task.get('date_uncertain', False)})
+    return sorted(result, key=lambda t: t['due_date'])
+
+
+app.mount('/', StaticFiles(directory=ROOT / 'web', html=True), name='web')

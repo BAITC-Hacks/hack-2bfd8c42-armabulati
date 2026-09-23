@@ -1,0 +1,19 @@
+{
+  "whisper": {
+    "repo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+    "revision": "0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf"
+  },
+  "speaker": {
+    "repo": "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+    "revision": "f0c48c298fd835726c27956a5d617bad7115627e"
+  },
+  "llm": {
+    "repo": "Qwen/Qwen3-4B-GGUF",
+    "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b"
+  },
+  "llama": {
+    "release": "b11120",
+    "asset": "llama-b11120-bin-win-cpu-x64.zip",
+    "sha256": "bbaf0584954c7ef53c2ccc5675f96b8849ac81ca181f540b862eefef1a09a402"
+  }
+}

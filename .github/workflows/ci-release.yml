@@ -43,6 +43,8 @@ jobs:
           python -m compileall -q app scripts
           node --check web/app.js
           node --check web/tools.js
+          node --check web/icons.js
+          node --test tests/icon_tooltips.test.cjs
       - name: Verify release allowlist
         run: python scripts/package_release.py
       - name: Upload test evidence

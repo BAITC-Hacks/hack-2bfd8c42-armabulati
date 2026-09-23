@@ -18,7 +18,7 @@ def build(output=None):
     files = [ROOT / file for file in FILES if (ROOT / file).is_file()]
     for directory in DIRECTORIES:
         files += [p for p in (ROOT / directory).rglob('*') if p.is_file()
-                  and '__pycache__' not in p.parts and p.suffix in ('.py', '.js', '.css', '.html', '.svg', '.md', '.txt', '.json')]
+                  and '__pycache__' not in p.parts and p.suffix in ('.py', '.js', '.cjs', '.css', '.html', '.svg', '.md', '.txt', '.json')]
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zipped:
         for path in sorted(files):
             zipped.write(path, 'alem-ai/' + path.relative_to(ROOT).as_posix())

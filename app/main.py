@@ -3,6 +3,8 @@ import os
 import secrets
 import shutil
 import uuid
+import hashlib
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -16,8 +18,11 @@ from . import store, pipeline
 from .config import DATA, ROOT, WHISPER, SPEAKER, LLM, LLAMA, MAX_UPLOAD
 from .dates import task_state
 from .export import pdf_bytes, docx_bytes, anonymize
+from . import cache
+from .insights import insights, search_segments, followup_agenda, calendar
 
 TOKEN = secrets.token_urlsafe(32)
+mutations = asyncio.Lock()
 
 
 @asynccontextmanager
@@ -38,7 +43,13 @@ async def secure(request, call_next):
     if request.method not in ('GET', 'HEAD', 'OPTIONS'):
         if not secrets.compare_digest(request.headers.get('x-alem-token', ''), TOKEN):
             return JSONResponse({'detail': 'Обновите страницу: отсутствует токен сессии.'}, status_code=403)
-    response = await call_next(request)
+        if int(request.headers.get('content-length', '0') or '0') > MAX_UPLOAD + 1024 * 1024:
+            return JSONResponse({'detail': 'Размер запроса превышает 250 МБ.'}, status_code=413)
+        # A meeting is persisted as one JSON document: serialize read/modify/write requests.
+        async with mutations:
+            response = await call_next(request)
+    else:
+        response = await call_next(request)
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['Referrer-Policy'] = 'no-referrer'
     response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
@@ -69,19 +80,21 @@ def require(mid, editable=False):
 def new_item(title, meeting_date, language, source):
     return {'id': uuid.uuid4().hex, 'title': title, 'date': meeting_date, 'language': language,
         'created_at': datetime.now().isoformat(), 'status': 'queued', 'stage': 'В очереди', 'progress': 0,
-        'source': source, 'segments': [], 'speakers': {}, 'summary': '', 'decisions': [], 'tasks': [], 'warnings': [], 'error': None}
+        'source': source, 'segments': [], 'speakers': {}, 'summary': '', 'decisions': [], 'tasks': [], 'warnings': [], 'error': None,
+        'processing_mode': 'accurate', 'timings': {}, 'cache_hit': False}
 
 
 @app.get('/api/bootstrap')
 def bootstrap():
-    return {'token': TOKEN, 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024}
+    return {'token': TOKEN, 'models': models_status(), 'offline': True, 'max_upload_mb': MAX_UPLOAD // 1024 // 1024,
+            'version': '0.2.0', 'active_jobs': len(pipeline.active)}
 
 
 @app.get('/api/meetings')
 def list_meetings():
     result = []
     for item in store.all_meetings():
-        result.append({**{k: item.get(k) for k in ['id', 'title', 'date', 'status', 'stage', 'progress', 'duration', 'source', 'error']},
+        result.append({**{k: item.get(k) for k in ['id', 'title', 'date', 'status', 'stage', 'progress', 'duration', 'source', 'error', 'timings', 'cache_hit', 'processing_mode']},
                        'task_count': len(item['tasks']), 'speaker_count': len(item['speakers']),
                        'done_count': sum(t['status'] == 'done' for t in item['tasks'])})
     return result
@@ -90,17 +103,21 @@ def list_meetings():
 @app.post('/api/meetings', status_code=202)
 async def upload(file: UploadFile = File(...), title: str = Form(..., min_length=1, max_length=200),
                  meeting_date: date = Form(...), language: Literal['auto', 'ru', 'kk', 'mixed'] = Form('auto'),
-                 speaker_count: int = Form(0, ge=0, le=20), consent: bool = Form(False)):
+                 speaker_count: int = Form(0, ge=0, le=20), consent: bool = Form(False),
+                 processing_mode: Literal['fast', 'accurate'] = Form('accurate')):
     if not consent:
         raise HTTPException(400, 'Подтвердите, что участники уведомлены о записи и обработке.')
     require_models()
+    if len(pipeline.active) >= 8:
+        raise HTTPException(429, 'В очереди уже 8 записей. Дождитесь завершения обработки.')
     suffix = Path(file.filename or '').suffix.lower()
     if suffix not in {'.mp3', '.wav', '.m4a', '.ogg', '.webm', '.mp4', '.flac', '.aac', '.mkv'}:
         raise HTTPException(400, 'Поддерживаются MP3, WAV, M4A, OGG, WEBM, MP4, FLAC, AAC, MKV.')
     item = new_item(title.strip() or 'Совещание', meeting_date.isoformat(), language, 'audio')
-    item.update(filename=Path(file.filename).name, audio_file=f"uploads/{item['id']}{suffix}", speaker_count=speaker_count, consent=True)
+    item.update(filename=Path(file.filename).name, audio_file=f"uploads/{item['id']}{suffix}", speaker_count=speaker_count, consent=True, processing_mode=processing_mode)
     target = DATA / item['audio_file']
     size = 0
+    digest = hashlib.sha256()
     try:
         with target.open('wb') as output:
             while chunk := await file.read(1024 * 1024):
@@ -108,6 +125,7 @@ async def upload(file: UploadFile = File(...), title: str = Form(..., min_length
                 if size > MAX_UPLOAD:
                     raise HTTPException(413, 'Размер записи превышает 250 МБ.')
                 output.write(chunk)
+                digest.update(chunk)
         if size == 0:
             raise HTTPException(400, 'Файл пустой.')
     except Exception:
@@ -115,6 +133,7 @@ async def upload(file: UploadFile = File(...), title: str = Form(..., min_length
         raise
     finally:
         await file.close()
+    item['cache_key'] = cache.key_for(digest.hexdigest(), item)
     store.save(item, 'Загружена запись; уведомление участников подтверждено')
     pipeline.submit(item['id'])
     return {'id': item['id']}
@@ -158,7 +177,29 @@ def get_meeting(mid: str):
     item = require(mid)
     for t in item['tasks']:
         t['computed_status'] = task_state(t)
+    item['insights'] = insights(item)
     return item
+
+
+@app.get('/api/meetings/{mid}/search')
+def search_meeting(mid: str, q: str = ''):
+    if len(q) > 300:
+        raise HTTPException(400, 'Поисковый запрос слишком длинный.')
+    return search_segments(require(mid), q)
+
+
+@app.get('/api/meetings/{mid}/agenda')
+def agenda(mid: str):
+    item = require(mid, True)
+    return Response(followup_agenda(item).encode('utf-8'), media_type='text/markdown; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename="followup-agenda.md"'})
+
+
+@app.get('/api/meetings/{mid}/calendar')
+def calendar_export(mid: str):
+    item = require(mid, True)
+    return Response(calendar(item), media_type='text/calendar; charset=utf-8',
+                    headers={'Content-Disposition': 'attachment; filename="alem-tasks.ics"'})
 
 
 @app.get('/api/meetings/{mid}/audio')
@@ -189,6 +230,30 @@ class TaskEdit(BaseModel):
     status: Literal['todo', 'in_progress', 'done']
     priority: Literal['normal', 'high']
     reviewed: bool
+
+
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=2000)
+    assignee: str = Field(default='', max_length=200)
+    due_date: date | None = None
+    evidence_ids: list[int] = Field(min_length=1, max_length=30)
+
+
+@app.post('/api/meetings/{mid}/tasks', status_code=201)
+def add_task(mid: str, body: TaskCreate):
+    item = require(mid, True)
+    segments = {s['id']: s for s in item['segments']}
+    if any(sid not in segments for sid in body.evidence_ids):
+        raise HTTPException(400, 'Укажите существующие реплики-основания.')
+    task = {'id': uuid.uuid4().hex, 'title': body.title, 'assignee': body.assignee,
+            'due_date': body.due_date.isoformat() if body.due_date else None,
+            'evidence_ids': list(dict.fromkeys(body.evidence_ids)),
+            'evidence': ' '.join(segments[sid]['text'] for sid in dict.fromkeys(body.evidence_ids)),
+            'speaker_id': '', 'deadline_text': '', 'date_uncertain': not bool(body.due_date),
+            'status': 'todo', 'priority': 'normal', 'reviewed': False, 'category': 'Добавлено вручную'}
+    item['tasks'].append(task)
+    store.save(item, 'Добавлено поручение по транскрипту')
+    return task
 
 
 @app.patch('/api/meetings/{mid}/tasks/{tid}')

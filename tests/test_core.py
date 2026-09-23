@@ -24,6 +24,7 @@ def test_deadlines():
     assert resolve_deadline('до пятницы', '2026-09-23') == ('2026-09-25', True)
     assert resolve_deadline('31 февраля', '2026-09-23') == (None, True)
     assert resolve_deadline('', '2026-09-23') == (None, True)
+    assert resolve_deadline('2026 жылғы 1 қазанға дейін', '2025-09-23') == ('2026-10-01', False)
 
 
 def test_completion_wins_over_deadline():

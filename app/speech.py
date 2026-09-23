@@ -1,12 +1,18 @@
 """Offline multilingual ASR and acoustic speaker clustering in a child process."""
 import json
 import sys
+import time
 from pathlib import Path
 import numpy as np
 from .config import WHISPER, SPEAKER, THREADS, MAX_SECONDS
 
 
 def diarize(audio, segments, requested=0):
+    if requested == 1:
+        for segment in segments:
+            segment['speaker'] = 'S1'
+            segment.pop('words', None)
+        return segments, {'S1': 'Участник 1'}, ['Указан один говорящий; разделение голосов не требуется.']
     import kaldi_native_fbank as knf
     import onnxruntime as ort
     from sklearn.cluster import AgglomerativeClustering
@@ -89,6 +95,7 @@ def run(mid):
     from . import store
     from .config import DATA
     item = store.get(mid)
+    started = time.perf_counter()
     audio = decode_audio(str(DATA / item['audio_file']), sampling_rate=16000)
     duration = len(audio) / 16000
     if duration < .5 or duration > MAX_SECONDS:
@@ -97,13 +104,17 @@ def run(mid):
     store.save(item)
     model = WhisperModel(str(WHISPER), device='cpu', compute_type='int8', cpu_threads=THREADS, local_files_only=True)
     language = item['language'] if item['language'] in ('ru', 'kk') else None
-    iterator, info = model.transcribe(audio, language=language, beam_size=3, vad_filter=True, word_timestamps=True, condition_on_previous_text=False, multilingual=item['language'] == 'mixed')
+    fast = item.get('processing_mode') == 'fast'
+    iterator, info = model.transcribe(audio, language=language, beam_size=1 if fast else 3,
+        temperature=0, vad_filter=True, word_timestamps=True, condition_on_previous_text=False,
+        multilingual=item['language'] == 'mixed')
     segments = []
     for s in iterator:
         if not s.text.strip():
             continue
         segments.append({'id': len(segments) + 1, 'start': round(s.start, 2), 'end': round(s.end, 2), 'text': s.text.strip(), 'confidence': round(float(np.exp(s.avg_logprob)), 3), 'words': [{'start': round(w.start, 2), 'end': round(w.end, 2), 'text': w.word} for w in (s.words or [])]})
-        item.update(stage=f'Распознавание: {int(s.end)} / {int(duration)} сек.', progress=min(65, 10 + int(55 * s.end / duration)))
+        item.update(stage=f'Распознавание: {int(s.end)} / {int(duration)} сек.', progress=min(65, 10 + int(55 * s.end / duration)),
+                    preview=[{k: v for k, v in row.items() if k != 'words'} for row in segments])
         store.save(item)
     if not segments:
         raise ValueError('Речь не обнаружена. Проверьте запись и уровень громкости.')
@@ -111,9 +122,13 @@ def run(mid):
     import gc
     gc.collect()
     item.update(stage='Различение голосов участников', progress=68)
+    item.setdefault('timings', {})['speech_seconds'] = round(time.perf_counter() - started, 2)
     store.save(item)
+    diarization_started = time.perf_counter()
     segments, speakers, warnings = diarize(audio, segments, item.get('speaker_count', 0))
     item.update(segments=segments, speakers=speakers, warnings=warnings, detected_language=info.language, stage='Речь распознана', progress=75)
+    item['timings']['diarization_seconds'] = round(time.perf_counter() - diarization_started, 2)
+    item.pop('preview', None)
     store.save(item)
 
 

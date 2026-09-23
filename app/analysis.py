@@ -103,6 +103,33 @@ def clean_result(result, item):
     return {'summary': str(result.get('summary', ''))[:20000], 'decisions': [str(d)[:2000] for d in result.get('decisions', [])][:50], 'tasks': tasks}
 
 
+def complete_stream(client, payload, report):
+    """Show real generation activity instead of a frozen progress indicator."""
+    parts, reason, last_update = [], None, time.monotonic()
+    with client.stream('POST', '/v1/chat/completions', json={**payload, 'stream': True}) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line.startswith('data:'):
+                continue
+            data = line[5:].strip()
+            if data == '[DONE]':
+                break
+            event = json.loads(data)
+            for choice in event.get('choices', []):
+                value = choice.get('delta', {}).get('content')
+                if value:
+                    parts.append(value)
+                reason = choice.get('finish_reason') or reason
+            if time.monotonic() - last_update >= 3:
+                report(sum(map(len, parts)))
+                last_update = time.monotonic()
+    if reason == 'length':
+        raise RuntimeError('Ответ модели превысил лимит. Сократите запись или текст.')
+    if reason not in ('stop', 'eos_token'):
+        raise RuntimeError('Генерация прервана до завершения. Повторите обработку.')
+    return ''.join(parts)
+
+
 def analyze(item, progress):
     chunks, current, length = [], [], 0
     # Overlap preserves nearby responses, deadlines and assignee references.
@@ -120,17 +147,15 @@ def analyze(item, progress):
     with local_model() as client:
         for index, chunk in enumerate(chunks):
             progress(f'Формирование поручений и саммари: часть {index + 1} из {len(chunks)}', 78 + int(index / len(chunks) * 18))
-            response = client.post('/v1/chat/completions', json={
+            payload = {
                 'messages': [{'role': 'system', 'content': SYSTEM}, {'role': 'user', 'content': f"Дата совещания: {item['date']}\nТРАНСКРИПТ:\n" + '\n'.join(chunk)}],
                 'temperature': 0, 'max_tokens': 5000,
                 'response_format': {'type': 'json_schema', 'json_schema': {'name': 'minutes', 'strict': True, 'schema': SCHEMA}},
                 'chat_template_kwargs': {'enable_thinking': False},
-            })
-            response.raise_for_status()
-            answer = response.json()['choices'][0]
-            if answer.get('finish_reason') == 'length':
-                raise RuntimeError('Ответ модели превысил лимит. Сократите запись или текст.')
-            content = answer['message']['content']
+            }
+            content = complete_stream(client, payload, lambda size: progress(
+                f'Формирование протокола: часть {index + 1}/{len(chunks)} · {size} символов',
+                78 + int(index / len(chunks) * 18)))
             content = re.sub(r'<think>.*?</think>', '', content, flags=re.S).strip()
             result = json.loads(content)
             combined['summary'] += ('\n\n' if combined['summary'] else '') + result['summary']

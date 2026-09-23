@@ -30,7 +30,9 @@ def resolve_deadline(raw, meeting_date):
         match = re.search(r'(\d{1,2})(?:-?\w+)?\s+(?:' + pattern + r')\w*(?:\s+(20\d{2}))?', text)
         if match:
             try:
-                return date(int(match[2] or base.year), month, int(match[1])).isoformat(), not bool(match[2])
+                year_before = re.search(r'(20\d{2})\s*(?:жыл\w*|ж\.)?\s*$', text[:match.start()])
+                year = match[2] or (year_before[1] if year_before else None)
+                return date(int(year or base.year), month, int(match[1])).isoformat(), not bool(year)
             except ValueError:
                 return None, True
     if re.search(r'послезавтра|бүрсігүні', text):

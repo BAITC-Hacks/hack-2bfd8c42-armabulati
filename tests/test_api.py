@@ -5,6 +5,7 @@ from app.main import app
 
 def test_api_guards_and_persistence(tmp_path, monkeypatch):
     monkeypatch.setattr(store, 'DATA', tmp_path)
+    monkeypatch.setattr('app.main.DATA', tmp_path)
     with TestClient(app, base_url='http://localhost') as client:
         assert client.get('/api/meetings').json() == []
         assert client.post('/api/transcripts', json={}).status_code == 403

@@ -16,6 +16,7 @@ def init():
     with connect() as con:
         con.execute('CREATE TABLE IF NOT EXISTS meetings (id TEXT PRIMARY KEY, payload TEXT NOT NULL, updated TEXT NOT NULL)')
         con.execute('CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, meeting_id TEXT, action TEXT, at TEXT)')
+        con.execute('CREATE TABLE IF NOT EXISTS analysis_cache (key TEXT PRIMARY KEY, payload TEXT NOT NULL, source_id TEXT NOT NULL)')
         rows = con.execute('SELECT id,payload FROM meetings').fetchall()
         for row in rows:
             item = json.loads(row['payload'])
@@ -47,3 +48,4 @@ def delete(mid):
     with connect() as con:
         con.execute('DELETE FROM meetings WHERE id=?', (mid,))
         con.execute('DELETE FROM audit WHERE meeting_id=?', (mid,))
+        con.execute('DELETE FROM analysis_cache WHERE source_id=?', (mid,))

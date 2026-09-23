@@ -1,0 +1,96 @@
+name: Verify and deliver Alem AI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: alem-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.lock.txt
+      - name: Python tests (no model downloads)
+        run: python -m pytest -q --junitxml=test-results.xml
+      - name: Compile backend and check frontend syntax
+        run: |
+          python -m compileall -q app scripts
+          node --check web/app.js
+          node --check web/tools.js
+      - name: Verify release allowlist
+        run: python scripts/package_release.py
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  release:
+    name: Publish verified source archive
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build archive and checksums
+        run: python scripts/package_release.py
+      - name: Upload downloadable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: alem-ai-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          version="$(cat VERSION)"
+          tag="build-${BUILD_NUMBER}-${COMMIT_SHA:0:7}"
+          printf 'Verified on Windows and Linux. Includes application source and setup scripts. Models, runtime binaries, recordings and database are excluded. Run setup.ps1 before first use.\n\nCommit: %s\n' "$COMMIT_SHA" > release-notes.md
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --target "$COMMIT_SHA" --title "Alem AI ${version} · build ${BUILD_NUMBER}" --notes-file release-notes.md
+          fi
